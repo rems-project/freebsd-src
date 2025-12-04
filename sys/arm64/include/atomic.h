@@ -48,7 +48,14 @@
  *	st	Full system, store
  *	sy	Full system, all
  */
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+#define	dsb(opt)	do { \
+	casemate_model_step_dsb(DxB_ ## opt); \
+	__asm __volatile("dsb " __STRING(opt) : : : "memory"); \
+} while (0)
+#else
 #define	dsb(opt)	__asm __volatile("dsb " __STRING(opt) : : : "memory")
+#endif
 #define	dmb(opt)	__asm __volatile("dmb " __STRING(opt) : : : "memory")
 
 #define	mb()	dmb(sy)	/* Full system memory barrier all */

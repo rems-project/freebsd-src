@@ -128,6 +128,40 @@ extern bool		pmap_lpa_enabled;
 #ifdef __CASEMATE_FREEBSD__
 #include <casemate.h>
 extern void *__casemate_state;
+
+
+#undef	PMAP_LOCK
+#define	PMAP_LOCK(pmap)		do { \
+	mtx_lock(PMAP_MTX(pmap)); \
+	if (__casemate_state) { \
+		casemate_model_step_lock((uint64_t)PMAP_MTX(pmap)); \
+	} \
+} while (0)
+
+#undef	PMAP_TRYLOCK
+#define	PMAP_TRYLOCK(pmap)		({ \
+	int __v = mtx_trylock(PMAP_MTX(pmap)); \
+	if (__casemate_state && __v) { \
+		casemate_model_step_trylock((uint64_t)PMAP_MTX(pmap)); \
+	} \
+	__v; \
+})
+
+#undef	PMAP_LOCK_INIT
+#define	PMAP_LOCK_INIT(pmap)	do { \
+	mtx_init(PMAP_MTX(pmap), "pmap", NULL, MTX_DEF | MTX_DUPOK); \
+	if (__casemate_state) { \
+		casemate_model_step_hint(GHOST_HINT_SET_ROOT_LOCK, (uint64_t)PMAP_MTX(pmap), pmap->pm_l0_paddr); \
+	} \
+} while (0)
+
+#undef	PMAP_UNLOCK
+#define	PMAP_UNLOCK(pmap)	do { \
+	mtx_unlock(PMAP_MTX(pmap)); \
+	if (__casemate_state) { \
+		casemate_model_step_unlock((uint64_t)PMAP_MTX(pmap)); \
+	} \
+} while (0)
 #endif
 
 #define	PMAP_WANT_ACTIVE_CPUS_NAIVE

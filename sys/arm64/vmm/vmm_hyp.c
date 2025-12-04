@@ -37,7 +37,7 @@
 #include "arm64.h"
 #include "hyp.h"
 
-#if defined(__CASEMATE_FREEBSD__) && !defined(VMM_VHE)
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
 #include <casemate.h>
 #include "io/debug_uart0.h"
 #endif
@@ -286,6 +286,9 @@ vmm_hyp_reg_restore(struct hypctx *hypctx, struct hyp *hyp, bool guest)
 
 	/* Restore the special registers */
 	WRITE_SPECIALREG(hcr_el2, hypctx->hcr_el2);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_msr(SYSREG_HCR_EL2, hypctx->hcr_el2);
+#endif
 
 	if (guest_or_nonvhe(guest)) {
 		uint64_t mmfr1 = READ_SPECIALREG(id_aa64mmfr1_el1);
@@ -532,6 +535,12 @@ vmm_hyp_call_guest(struct hyp *hyp, struct hypctx *hypctx)
 	ich_hcr_el2 = READ_SPECIALREG(ich_hcr_el2);
 	ich_vmcr_el2 = READ_SPECIALREG(ich_vmcr_el2);
 
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	/* CASEMATE: HACK: load the VTTBR before HCR
+	 * this is fine, as we're out-of-context */
+	casemate_model_step_msr(SYSREG_VTTBR, hyp->vttbr_el2);
+#endif
+
 	vmm_hyp_reg_restore(hypctx, hyp, true);
 
 	/* Load the common hypervisor registers */
@@ -545,6 +554,9 @@ vmm_hyp_call_guest(struct hyp *hyp, struct hypctx *hypctx)
 
 	WRITE_SPECIALREG(mdcr_el2, host_hypctx.mdcr_el2);
 	isb();
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_isb();
+#endif
 
 	/* Store the exit info */
 	hypctx->exit_info.far_el2 = READ_SPECIALREG(far_el2);
@@ -641,6 +653,9 @@ VMM_HYP_FUNC(clean_s2_tlbi)(void)
 {
 	dsb(ishst);
 	__asm __volatile("tlbi alle1is");
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_tlbi(TLBI_alle1is);
+#endif
 	dsb(ish);
 }
 
@@ -667,11 +682,17 @@ VMM_HYP_FUNC(s2_tlbi_range)(uint64_t vttbr, vm_offset_t sva, vm_offset_t eva,
 	/* TODO: Handle Cortex-A57/A72 erratum 131936 */
 	host_vttbr = READ_SPECIALREG(vttbr_el2);
 	WRITE_SPECIALREG(vttbr_el2, vttbr);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_msr(SYSREG_VTTBR, vttbr);
+#endif
 	isb();
 
 #ifdef VMM_VHE
 	host_tcr = READ_SPECIALREG(tcr_el2);
 	WRITE_SPECIALREG(tcr_el2, host_tcr & ~HCR_TGE);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_msr(SYSREG_TCR_EL2, vttbr);
+#endif
 	isb();
 #endif
 
@@ -691,11 +712,22 @@ VMM_HYP_FUNC(s2_tlbi_range)(uint64_t vttbr, vm_offset_t sva, vm_offset_t eva,
 			__asm __volatile("tlbi	ipas2le1is, %0" : : "r"(r));
 		else
 			__asm __volatile("tlbi	ipas2e1is, %0" : : "r"(r));
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+		casemate_model_step_dsb(DxB_ishst);
+		/* XXX final_only ?*/
+		casemate_model_step_tlbi_reg(TLBI_ipas2e1is, r);
+#endif
 	}
 	/* Ensure the entry has been invalidated */
 	dsb(ish);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	//casemate_model_step_dsb(DxB_ish);
+#endif
 	/* Invalidate the stage 1 TLB. */
 	__asm __volatile("tlbi vmalle1is");
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_tlbi(TLBI_vmalle1is);
+#endif
 	dsb(ish);
 	isb();
 
@@ -706,6 +738,9 @@ VMM_HYP_FUNC(s2_tlbi_range)(uint64_t vttbr, vm_offset_t sva, vm_offset_t eva,
 
 	/* Switch back to the host vttbr */
 	WRITE_SPECIALREG(vttbr_el2, host_vttbr);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_msr(SYSREG_VTTBR, host_vttbr);
+#endif
 	isb();
 }
 
@@ -722,13 +757,22 @@ VMM_HYP_FUNC(s2_tlbi_all)(uint64_t vttbr)
 	/* TODO: Handle Cortex-A57/A72 erratum 131936 */
 	host_vttbr = READ_SPECIALREG(vttbr_el2);
 	WRITE_SPECIALREG(vttbr_el2, vttbr);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_msr(SYSREG_VTTBR, vttbr);
+#endif
 	isb();
 
 	__asm __volatile("tlbi vmalls12e1is");
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_tlbi(TLBI_vmalls12e1is);
+#endif
 	dsb(ish);
 	isb();
 
 	/* Switch back t othe host vttbr */
 	WRITE_SPECIALREG(vttbr_el2, host_vttbr);
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+	casemate_model_step_msr(SYSREG_VTTBR, host_vttbr);
+#endif
 	isb();
 }

@@ -118,20 +118,20 @@ casemate_ensure_setup(uint64_t smva, size_t sm_size)
 		.trace = &casemate_ghost_driver_trace,
 	};
 	initialise_ghost_driver(&cm_driver);
-	r = attach_casemate_model((void*)smva);
 
+	r = attach_casemate_model((void*)smva);
 	if (r)
-		return -1;
+		return r;
 
 	__casemate_init = true;
 
 	casemate_model_step_msr(SYSREG_MAIR_EL2, READ_SPECIALREG(MAIR_EL2));
 	casemate_model_step_msr(SYSREG_TCR_EL2, READ_SPECIALREG(TCR_EL2));
+	casemate_model_step_msr(SYSREG_HCR_EL2, READ_SPECIALREG(HCR_EL2));
 	casemate_model_step_msr(SYSREG_VTCR_EL2, READ_SPECIALREG(VTCR_EL2));
 	casemate_model_step_msr(SYSREG_TTBR_EL2, READ_SPECIALREG(TTBR0_EL2));
 	casemate_model_step_msr(SYSREG_VTTBR, READ_SPECIALREG(VTTBR_EL2));
-
-	casemate_puts("vmm: CASEMATE: initialised EL2\n");
+	casemate_model_step_msr(SYSREG_SCTLR_EL2, READ_SPECIALREG(SCTLR_EL2));
 
 	return (0);
 }
@@ -171,12 +171,16 @@ vmm_el2_tlbi(uint64_t type, uint64_t start, uint64_t len)
 	switch (type) {
 	default:
 	case HYP_EL2_TLBI_ALL:
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_tlbi(TLBI_alle2);
+#endif
 		__asm __volatile("tlbi	alle2" ::: "memory");
 		break;
 	case HYP_EL2_TLBI_VA:
 		end = TLBI_VA(start + len);
 		start = TLBI_VA(start);
 		for (r = start; r < end; r += TLBI_VA_L3_INCR) {
+			casemate_model_step_tlbi_reg(TLBI_vae2is, r);
 			__asm __volatile("tlbi	vae2is, %0" :: "r"(r));
 		}
 		break;

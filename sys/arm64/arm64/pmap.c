@@ -640,7 +640,8 @@ __annotated_casemate_store_fn2(pmap_store, entry, atomic_store_64(table, entry))
 #define	pmap_load_clear(table)		atomic_swap_64(table, 0)
 #define	pmap_load_store(table, entry)	atomic_swap_64(table, entry)
 #define	pmap_set_bits(table, bits)	atomic_set_64(table, bits)
-#define	pmap_store(table, entry)	atomic_store_64(table, entry)
+#define pmap_store(table, entry)        atomic_store_64(table, entry)
+#endif
 
 /********************/
 /* Inline functions */
@@ -2880,6 +2881,13 @@ pmap_pinit_stage(pmap_t pmap, enum pmap_stage stage, int levels)
 	    VM_ALLOC_ZERO);
 	pmap->pm_l0_paddr = VM_PAGE_TO_PHYS(m);
 	pmap->pm_l0 = (pd_entry_t *)PHYS_TO_DMAP(pmap->pm_l0_paddr);
+#if defined(__CASEMATE_FREEBSD__)
+	/* CASEMATE: HACK */
+	pmap->pm_ttbr = 0;
+	/*KASSERT(pmap->pm_ttbr == 0,
+	            ("%s: Bad non-zero initial pmap ttbr\n", __func__));*/
+	casemate_model_step_init(m->phys_addr, PAGE_SIZE);
+#endif
 
 	TAILQ_INIT(&pmap->pm_pvchunk);
 	vm_radix_init(&pmap->pm_root);
@@ -2922,6 +2930,9 @@ pmap_pinit_stage(pmap_t pmap, enum pmap_stage stage, int levels)
 		PMAP_UNLOCK(pmap);
 	}
 	pmap->pm_ttbr = VM_PAGE_TO_PHYS(m);
+#if defined(__CASEMATE_FREEBSD__)
+	casemate_model_step_hint(GHOST_HINT_SET_ROOT_LOCK, pmap->pm_ttbr, (uint64_t)PMAP_MTX(pmap));
+#endif
 
 	return (1);
 }
@@ -2968,6 +2979,12 @@ _pmap_alloc_l3(pmap_t pmap, vm_pindex_t ptepindex, struct rwlock **lockp)
 		 */
 		return (NULL);
 	}
+#if defined(__CASEMATE_FREEBSD__)
+	casemate_model_step_init(m->phys_addr, PAGE_SIZE);
+
+	if (pmap->pm_ttbr)
+		casemate_model_step_hint(GHOST_HINT_SET_OWNER_ROOT, VM_PAGE_TO_PHYS(m), pmap->pm_ttbr);
+#endif
 	m->pindex = ptepindex;
 
 	/*
@@ -3207,6 +3224,12 @@ pmap_release(pmap_t pmap)
 	struct asid_set *set;
 	vm_page_t m;
 	int asid;
+
+#ifdef __CASEMATE_FREEBSD__
+	/* CASEMATE: mark the table as not a pte anymore and release all tracking obligiations
+	 */
+	casemate_model_step_hint(GHOST_HINT_RELEASE_TABLE, pmap->pm_l0_paddr, 0);
+#endif
 
 	if (pmap->pm_levels != 4) {
 		PMAP_ASSERT_STAGE2(pmap);
@@ -8739,6 +8762,10 @@ pmap_demote_l2_locked(pmap_t pmap, pt_entry_t *l2, vm_offset_t va,
 			goto fail;
 		}
 		ml3->pindex = pmap_l2_pindex(va);
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_init(ml3->phys_addr, PAGE_SIZE);
+		casemate_model_step_hint(GHOST_HINT_SET_OWNER_ROOT, VM_PAGE_TO_PHYS(ml3), pmap->pm_l0_paddr);
+#endif
 
 		if (ADDR_IS_USER(va)) {
 			ml3->ref_count = NL3PG;

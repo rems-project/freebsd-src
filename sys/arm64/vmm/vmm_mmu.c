@@ -49,7 +49,7 @@
 #include "mmu.h"
 #include "arm64.h"
 
-#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+#if defined(__CASEMATE_FREEBSD__)
 #include <casemate.h>
 #endif
 
@@ -65,11 +65,17 @@ vmmpmap_init(void)
 	m = vm_page_alloc_noobj(VM_ALLOC_WIRED | VM_ALLOC_ZERO);
 	if (m == NULL)
 		return (false);
-
 	l0_paddr = VM_PAGE_TO_PHYS(m);
+#if defined(__CASEMATE_FREEBSD__)
+	casemate_model_step_init(l0_paddr, PAGE_SIZE);
+#endif
+
 	l0 = (pd_entry_t *)PHYS_TO_DMAP(l0_paddr);
 
 	mtx_init(&vmmpmap_mtx, "vmm pmap", NULL, MTX_DEF);
+#if defined(__CASEMATE_FREEBSD__)
+	casemate_model_step_hint(GHOST_HINT_SET_ROOT_LOCK, l0_paddr, (uint64_t)&vmmpmap_mtx);
+#endif
 
 	return (true);
 }
@@ -89,6 +95,9 @@ vmmpmap_release_l3(pd_entry_t l2e)
 
 	m = PHYS_TO_VM_PAGE(l2e & ~ATTR_MASK);
 	vm_page_unwire_noq(m);
+#if defined(__CASEMATE_FREEBSD__)
+	casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 	vm_page_free(m);
 }
 
@@ -108,6 +117,9 @@ vmmpmap_release_l2(pd_entry_t l1e)
 
 	m = PHYS_TO_VM_PAGE(l1e & ~ATTR_MASK);
 	vm_page_unwire_noq(m);
+#ifdef __CASEMATE_FREEBSD__
+	casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 	vm_page_free(m);
 }
 
@@ -127,6 +139,9 @@ vmmpmap_release_l1(pd_entry_t l0e)
 
 	m = PHYS_TO_VM_PAGE(l0e & ~ATTR_MASK);
 	vm_page_unwire_noq(m);
+#ifdef __CASEMATE_FREEBSD__
+	casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 	vm_page_free(m);
 }
 
@@ -142,6 +157,11 @@ vmmpmap_fini(void)
 			vmmpmap_release_l1(l0[i]);
 		}
 	}
+
+#ifdef __CASEMATE_FREEBSD__
+	casemate_model_step_hint(GHOST_HINT_RELEASE_TABLE, l0_paddr, 0);
+	casemate_model_step_free(l0_paddr, PAGE_SIZE);
+#endif
 
 	m = PHYS_TO_VM_PAGE(l0_paddr);
 	vm_page_unwire_noq(m);
@@ -174,12 +194,25 @@ again:
 			m = vm_page_alloc_noobj(VM_ALLOC_WIRED | VM_ALLOC_ZERO);
 			if (m == NULL)
 				return (NULL);
+#if defined(__CASEMATE_FREEBSD__)
+			casemate_model_step_init(m->phys_addr, PAGE_SIZE);
+			casemate_model_step_hint(GHOST_HINT_SET_OWNER_ROOT, VM_PAGE_TO_PHYS(m), l0_paddr);
+#endif
 		}
 
 		new_l0e = VM_PAGE_TO_PHYS(m) | L0_TABLE;
 
 		mtx_lock(&vmmpmap_mtx);
 		rv = atomic_cmpset_64(&l0[pmap_l0_index(va)], l0e, new_l0e);
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_lock((uint64_t)&vmmpmap_mtx);
+		if (rv) {
+			/* CASEMATE: success, wrote l0e */
+			uint64_t __phys = DMAP_TO_PHYS((uint64_t)&l0[pmap_l0_index(va)]);
+			casemate_model_step_write(WMO_plain, __phys, l0e);
+		}
+		casemate_model_step_unlock((uint64_t)&vmmpmap_mtx);
+#endif
 		mtx_unlock(&vmmpmap_mtx);
 		/* We may have raced another thread, try again */
 		if (rv == 0)
@@ -190,6 +223,9 @@ again:
 	} else if (m != NULL) {
 		/* We allocated a page that wasn't used */
 		vm_page_unwire_noq(m);
+#ifdef __CASEMATE_FREEBSD__
+		casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 		vm_page_free_zero(m);
 	}
 
@@ -217,12 +253,25 @@ again:
 			m = vm_page_alloc_noobj(VM_ALLOC_WIRED | VM_ALLOC_ZERO);
 			if (m == NULL)
 				return (NULL);
+#if defined(__CASEMATE_FREEBSD__)
+			casemate_model_step_init(m->phys_addr, PAGE_SIZE);
+			casemate_model_step_hint(GHOST_HINT_SET_OWNER_ROOT, VM_PAGE_TO_PHYS(m), l0_paddr);
+#endif
 		}
 
 		new_l1e = VM_PAGE_TO_PHYS(m) | L1_TABLE;
 
 		mtx_lock(&vmmpmap_mtx);
 		rv = atomic_cmpset_64(&l1[pmap_l1_index(va)], l1e, new_l1e);
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_lock((uint64_t)&vmmpmap_mtx);
+		if (rv) {
+			/* CASEMATE: success, wrote l1e */
+			uint64_t __phys = DMAP_TO_PHYS((uint64_t)&l1[pmap_l1_index(va)]);
+			casemate_model_step_write(WMO_plain, __phys, l1e);
+		}
+		casemate_model_step_unlock((uint64_t)&vmmpmap_mtx);
+#endif
 		mtx_unlock(&vmmpmap_mtx);
 		/* We may have raced another thread, try again */
 		if (rv == 0)
@@ -233,6 +282,9 @@ again:
 	} else if (m != NULL) {
 		/* We allocated a page that wasn't used */
 		vm_page_unwire_noq(m);
+#ifdef __CASEMATE_FREEBSD__
+		//casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 		vm_page_free_zero(m);
 	}
 
@@ -260,12 +312,25 @@ again:
 			m = vm_page_alloc_noobj(VM_ALLOC_WIRED | VM_ALLOC_ZERO);
 			if (m == NULL)
 				return (NULL);
+#if defined(__CASEMATE_FREEBSD__)
+			casemate_model_step_init(m->phys_addr, PAGE_SIZE);
+			casemate_model_step_hint(GHOST_HINT_SET_OWNER_ROOT, VM_PAGE_TO_PHYS(m), l0_paddr);
+#endif
 		}
 
 		new_l2e = VM_PAGE_TO_PHYS(m) | L2_TABLE;
 
 		mtx_lock(&vmmpmap_mtx);
 		rv = atomic_cmpset_64(&l2[pmap_l2_index(va)], l2e, new_l2e);
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_lock((uint64_t)&vmmpmap_mtx);
+		if (rv) {
+			/* CASEMATE: success, wrote l2e */
+			uint64_t __phys = DMAP_TO_PHYS((uint64_t)&l2[pmap_l2_index(va)]);
+			casemate_model_step_write(WMO_plain, __phys, l2e);
+		}
+		casemate_model_step_unlock((uint64_t)&vmmpmap_mtx);
+#endif
 		mtx_unlock(&vmmpmap_mtx);
 		/* We may have raced another thread, try again */
 		if (rv == 0)
@@ -276,6 +341,9 @@ again:
 	} else if (m != NULL) {
 		/* We allocated a page that wasn't used */
 		vm_page_unwire_noq(m);
+#ifdef __CASEMATE_FREEBSD__
+		//casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 		vm_page_free_zero(m);
 	}
 
@@ -328,6 +396,11 @@ vmmpmap_enter(vm_offset_t va, vm_size_t size, vm_paddr_t pa, vm_prot_t prot)
 		    ("%s: VA already mapped", __func__));
 
 		atomic_store_64(&l3[pmap_l3_index(va)], l3e | pa);
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_lock((uint64_t)&vmmpmap_mtx);
+		casemate_model_step_write(WMO_plain, DMAP_TO_PHYS((uint64_t)&l3[pmap_l3_index(va)]), (uint64_t)(l3e | pa));
+		casemate_model_step_unlock((uint64_t)&vmmpmap_mtx);
+#endif
 #ifdef INVARIANTS
 		mtx_unlock(&vmmpmap_mtx);
 #endif
@@ -361,6 +434,9 @@ vmmpmap_remove(vm_offset_t va, vm_size_t size, bool invalidate)
 	sva = va;
 	eva = va + size;
 	mtx_lock(&vmmpmap_mtx);
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_lock((uint64_t)&vmmpmap_mtx);
+#endif
 	for (i = 0; va < eva; va = va_next) {
 		l0e = atomic_load_64(&l0[pmap_l0_index(va)]);
 		if (l0e == 0) {
@@ -402,6 +478,9 @@ vmmpmap_remove(vm_offset_t va, vm_size_t size, bool invalidate)
 			l3e &= ~ATTR_S1_AP_MASK;
 			l3e |= ATTR_S1_AP(ATTR_S1_AP_RO);
 			atomic_store_64(&l3[pmap_l3_index(va)], l3e);
+#if defined(__CASEMATE_FREEBSD__)
+			casemate_model_step_write(WMO_plain, DMAP_TO_PHYS((uint64_t)&l3[pmap_l3_index(va)]), l3e);
+#endif
 
 			l3_list[i] = &l3[pmap_l3_index(va)];
 			i++;
@@ -411,12 +490,18 @@ vmmpmap_remove(vm_offset_t va, vm_size_t size, bool invalidate)
 			 * handling the TLB
 			 */
 			atomic_store_64(&l3[pmap_l3_index(va)], 0);
+#if defined(__CASEMATE_FREEBSD__)
+			casemate_model_step_write(WMO_plain, DMAP_TO_PHYS((uint64_t)&l3[pmap_l3_index(va)]), 0);
+#endif
 		}
 
 		va_next = (va + L3_SIZE) & ~L3_OFFSET;
 		if (va_next < va)
 			va_next = eva;
 	}
+#if defined(__CASEMATE_FREEBSD__)
+		casemate_model_step_unlock((uint64_t)&vmmpmap_mtx);
+#endif
 	mtx_unlock(&vmmpmap_mtx);
 
 	if (invalidate) {
@@ -425,6 +510,9 @@ vmmpmap_remove(vm_offset_t va, vm_size_t size, bool invalidate)
 
 		for (i = 0; i < (size / PAGE_SIZE); i++) {
 			atomic_store_64(l3_list[i], 0);
+#if defined(__CASEMATE_FREEBSD__)
+			casemate_model_step_write(WMO_plain, DMAP_TO_PHYS((uint64_t)l3_list[i]), 0);
+#endif
 		}
 
 		vmm_call_hyp(HYP_EL2_TLBI, HYP_EL2_TLBI_VA, sva, size);

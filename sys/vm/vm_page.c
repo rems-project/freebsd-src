@@ -111,6 +111,10 @@
 
 #include <machine/md_var.h>
 
+#if defined(__CASEMATE_FREEBSD__)
+#include <casemate.h>
+#endif
+
 struct vm_domain vm_dom[MAXMEMDOM];
 
 DPCPU_DEFINE_STATIC(struct vm_batchqueue, pqbatch[MAXMEMDOM][PQ_COUNT]);
@@ -4156,6 +4160,10 @@ vm_page_free_toq(vm_page_t m)
 {
 	struct vm_domain *vmd;
 	uma_zone_t zone;
+
+#ifdef __CASEMATE_FREEBSD__
+	casemate_model_step_free(m->phys_addr, PAGE_SIZE);
+#endif
 
 	if (!vm_page_free_prep(m))
 		return;
