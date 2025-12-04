@@ -2071,6 +2071,248 @@ link_elf_ireloc(void)
 	TSEXIT();
 }
 
+/* CASEMATE: HACK: apply relocations on dyanmically created ELF objects */
+int
+load_dynamic_elf_at(const char *filename, caddr_t elf_obj,
+    vm_offset_t lma, linker_file_t* result)
+{
+	/* an augmented version of link_elf_load_file() */
+	/* naming convention:
+	 *   xxxebase = location (kernel addr) in elf object
+	 *   xxxlbase = location (kernel addr) to link the object
+	 *   xxxvbase = location (target addr) object will be loaded at
+	 */
+	Elf_Ehdr *hdr;
+	caddr_t seglbase;
+	int nbytes, i;
+	Elf_Phdr *phdr;
+	Elf_Phdr *phlimit;
+	Elf_Phdr *segs[MAXSEGS];
+	int nsegs;
+	Elf_Phdr *phdyn;
+	size_t mapsize;
+	Elf_Addr base_vaddr;
+	Elf_Addr base_vlimit;
+	int error = 0;
+	elf_file_t ef;
+	linker_file_t lf;
+	Elf_Shdr *shdr;
+	int symtabindex;
+	int symstrindex;
+	int shstrindex;
+	int symcnt;
+	int strcnt;
+	char *shstrs;
+
+	shdr = NULL;
+	lf = NULL;
+	shstrs = NULL;
+
+	/*
+	 * Read the elf header
+	 */
+	hdr = (Elf_Ehdr *)elf_obj;
+
+	if (!IS_ELF(*hdr)) {
+		link_elf_error(filename, "Not ELF");
+		error = ENOEXEC;
+		goto out;
+	}
+
+	if (hdr->e_ident[EI_CLASS] != ELF_TARG_CLASS ||
+	    hdr->e_ident[EI_DATA] != ELF_TARG_DATA) {
+		link_elf_error(filename, "Unsupported file layout");
+		error = ENOEXEC;
+		goto out;
+	}
+	if (hdr->e_ident[EI_VERSION] != EV_CURRENT ||
+	    hdr->e_version != EV_CURRENT) {
+		link_elf_error(filename, "Unsupported file version");
+		error = ENOEXEC;
+		goto out;
+	}
+	if (hdr->e_type != ET_EXEC && hdr->e_type != ET_DYN) {
+		link_elf_error(filename, "Unsupported type");
+		error = ENOSYS;
+		goto out;
+	}
+	if (hdr->e_machine != ELF_TARG_MACH) {
+		link_elf_error(filename, "Unsupported machine");
+		error = ENOEXEC;
+		goto out;
+	}
+
+	/*
+	 * Scan the program header entries, and save key information.
+	 *
+	 * We rely on there being exactly two load segments, text and data,
+	 * in that order.
+	 */
+	phdr = (Elf_Phdr *) (elf_obj + hdr->e_phoff);
+	phlimit = phdr + hdr->e_phnum;
+	nsegs = 0;
+	phdyn = NULL;
+	while (phdr < phlimit) {
+		switch (phdr->p_type) {
+		case PT_LOAD:
+			if (nsegs == MAXSEGS) {
+				link_elf_error(filename, "Too many sections");
+				error = ENOEXEC;
+				goto out;
+			}
+			/*
+			 * XXX: We just trust they come in right order ??
+			 */
+			segs[nsegs] = phdr;
+			++nsegs;
+			break;
+
+		case PT_DYNAMIC:
+			phdyn = phdr;
+			break;
+
+		case PT_INTERP:
+			link_elf_error(filename, "Unexpected PT_INTERP");
+			error = ENOSYS;
+			goto out;
+		default:
+			/* PT_NULL, PT_NOTE, PT_PHDR, etc */
+			break;
+		}
+
+		++phdr;
+	}
+	if (phdyn == NULL) {
+		link_elf_error(filename, "Object is not dynamically-linked");
+		error = ENOEXEC;
+		goto out;
+	}
+	if (nsegs == 0) {
+		link_elf_error(filename, "No sections");
+		error = ENOEXEC;
+		goto out;
+	}
+
+	/*
+	 * Allocate the entire address space of the object, to stake
+	 * out our contiguous region, and to establish the base
+	 * address for relocation.
+	 */
+	base_vaddr = trunc_page(segs[0]->p_vaddr);
+	base_vlimit = round_page(segs[nsegs - 1]->p_vaddr +
+	    segs[nsegs - 1]->p_memsz);
+	mapsize = base_vlimit - base_vaddr;
+
+	lf = linker_make_file(filename, &link_elf_class);
+	if (lf == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	/*
+	 * Read the text and data segments and zero any bss sections.
+	 */
+	for (i = 0; i < nsegs; i++) {
+		seglbase = (caddr_t)lma + segs[i]->p_vaddr - base_vaddr;
+
+		/* actually load the segment into the load address */
+		memcpy(seglbase, elf_obj + segs[i]->p_offset, segs[i]->p_filesz);
+
+		/* if memsz > filesz, segment ends in a bss which must be zeroed now */
+		bzero(seglbase + segs[i]->p_filesz,
+		    segs[i]->p_memsz - segs[i]->p_filesz);
+	}
+
+	ef = (elf_file_t) lf;
+	ef->address = (caddr_t)lma;
+	ef->dynamic = (Elf_Dyn *) (ef->address + phdyn->p_vaddr - base_vaddr);
+	lf->address = ef->address;
+	lf->size = mapsize;
+
+	error = parse_dynamic(ef);
+	if (error != 0)
+		goto out;
+	error = parse_dpcpu(ef);
+	if (error != 0)
+		goto out;
+
+	/* actually do relocations against the lma */
+	lf->address = (caddr_t)lma;
+
+	link_elf_reloc_local(lf);
+
+	error = linker_load_dependencies(lf);
+	if (error != 0)
+		goto out;
+	error = relocate_file(ef);
+	if (error != 0)
+		goto out;
+
+	/*
+	 * Try and load the symbol table if it's present.  (you can
+	 * strip it!)
+	 */
+	nbytes = hdr->e_shnum * hdr->e_shentsize;
+	if (nbytes == 0 || hdr->e_shoff == 0)
+		goto nosyms;
+
+	/* Read section string table */
+	shdr = (Elf_Shdr *)(elf_obj + hdr->e_shoff);
+	shstrindex = hdr->e_shstrndx;
+	if (shstrindex != 0 && shdr[shstrindex].sh_type == SHT_STRTAB &&
+	    shdr[shstrindex].sh_size != 0) {
+		shstrs = elf_obj + shdr[shstrindex].sh_offset;
+	}
+
+	symtabindex = -1;
+	symstrindex = -1;
+	for (i = 0; i < hdr->e_shnum; i++) {
+		if (shdr[i].sh_type == SHT_SYMTAB) {
+			symtabindex = i;
+			symstrindex = shdr[i].sh_link;
+		} else if (shstrs != NULL && shdr[i].sh_name != 0 &&
+		    strcmp(shstrs + shdr[i].sh_name, ".ctors") == 0) {
+			/* Record relocated address and size of .ctors. */
+			lf->ctors_addr = (caddr_t)lma + shdr[i].sh_addr - base_vaddr;
+			lf->ctors_size = shdr[i].sh_size;
+		}
+	}
+	if (symtabindex < 0 || symstrindex < 0)
+		goto nosyms;
+
+	symcnt = shdr[symtabindex].sh_size;
+	ef->symbase = malloc(symcnt, M_LINKER, M_WAITOK);
+	memcpy(ef->symbase, elf_obj+shdr[symtabindex].sh_offset, symcnt);
+
+	strcnt = shdr[symstrindex].sh_size;
+	ef->strbase = malloc(strcnt, M_LINKER, M_WAITOK);
+	memcpy(ef->strbase, elf_obj+shdr[symstrindex].sh_offset, strcnt);
+
+	ef->ddbsymcnt = symcnt / sizeof(Elf_Sym);
+	ef->ddbsymtab = (const Elf_Sym *)ef->symbase;
+	ef->ddbstrcnt = strcnt;
+	ef->ddbstrtab = ef->strbase;
+
+nosyms:
+
+#ifdef __arm__
+	link_elf_locate_exidx(lf, shdr, hdr->e_shnum);
+#endif
+
+	error = link_elf_link_common_finish(lf);
+	if (error != 0)
+		goto out;
+
+	*result = lf;
+
+out:
+	if (error)
+		panic("%s: %s error: %d",
+		    __func__, filename, error);
+
+	return (0);
+}
+
 #if defined(__aarch64__) || defined(__amd64__)
 void
 link_elf_late_ireloc(void)

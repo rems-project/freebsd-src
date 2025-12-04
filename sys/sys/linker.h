@@ -326,6 +326,10 @@ const Elf_Sym *elf_get_sym(linker_file_t _lf, Elf_Size _symidx);
 const char *elf_get_symname(linker_file_t _lf, Elf_Size _symidx);
 void	link_elf_ireloc(void);
 
+/* CASEMATE: HACK: apply relocations on dyanmically created ELF objects */
+int load_dynamic_elf_at(const char *filename, caddr_t elf_obj,
+        vm_offset_t lma, linker_file_t* result);
+
 #if defined(__aarch64__) || defined(__amd64__)
 int	elf_reloc_late(linker_file_t _lf, Elf_Addr base, const void *_rel,
 	    int _type, elf_lookup_fn _lu);

@@ -35,10 +35,31 @@
 
 	.section .rodata
 	.align PAGE_SHIFT
+
+	/* CASEMATE: HACK: separate ELF + binary blobs to load */
+
+	/* the nVHE ELF blob */
+	.globl vmm_hyp_elf_blob
+vmm_hyp_elf_blob:
+	.incbin "vmm_hyp_blob.elf"
+	.globl vmm_hyp_elf_blob_end
+vmm_hyp_elf_blob_end:
+
+	/* empty page between ELF blob and load segment to catch overflows */
+	.align PAGE_SHIFT
+	.space PAGE_SIZE
+
+	/* reserve space to load nVHE blob at
+	 * and align it on a 2M boundary */
+	.align 25
 	.globl vmm_hyp_code
 vmm_hyp_code:
-	.incbin "vmm_hyp_blob.bin"
+	.space PAGE_SIZE_64K
 	.globl vmm_hyp_code_end
 vmm_hyp_code_end:
+
+	/* empty page after the load segment to catch overflows */
+	.align PAGE_SHIFT
+	.space PAGE_SIZE
 
 GNU_PROPERTY_AARCH64_FEATURE_1_NOTE(GNU_PROPERTY_AARCH64_FEATURE_1_VAL)

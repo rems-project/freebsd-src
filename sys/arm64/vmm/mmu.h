@@ -37,6 +37,10 @@
 
 #include "hyp.h"
 
+/* CASEMATE: HACK: the EL2 nVHE ELF blob */
+extern char vmm_hyp_elf_blob;
+extern char vmm_hyp_elf_blob_end;
+
 extern char vmm_hyp_code;
 extern char vmm_hyp_code_end;
 

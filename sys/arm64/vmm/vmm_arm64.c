@@ -98,6 +98,11 @@ extern char hyp_stub_vectors[];
 static vm_paddr_t hyp_code_base;
 static size_t hyp_code_len;
 
+#if defined(__CASEMATE_FREEBSD__)
+/* CASEMATE: HACK: nVHE linked sections */
+#include <sys/linker.h>
+#endif
+
 static char *stack[MAXCPU];
 static vm_offset_t stack_hyp_va[MAXCPU];
 
@@ -144,7 +149,11 @@ arm_setup_vectors(void *arg)
 	sctlr_el2 = SCTLR_EL2_RES1;
 	sctlr_el2 |= SCTLR_EL2_M | SCTLR_EL2_C | SCTLR_EL2_I;
 	sctlr_el2 |= SCTLR_EL2_A | SCTLR_EL2_SA;
+#ifdef __CASEMATE_FREEBSD__
+	/* CASEMATE: HACK: no WXN */
+#else
 	sctlr_el2 |= SCTLR_EL2_WXN;
+#endif
 	sctlr_el2 &= ~SCTLR_EL2_EE;
 
 	daif = intr_disable();
@@ -159,7 +168,7 @@ arm_setup_vectors(void *arg)
 		 * x0: the exception vector table responsible for hypervisor
 		 * initialization on the next call.
 		 */
-		vmm_call_hyp(vtophys(&vmm_hyp_code));
+		vmm_call_hyp(hyp_code_base);
 
 		/* Create and map the hypervisor stack */
 		stack_top = stack_hyp_va[PCPU_GET(cpuid)] + VMM_STACK_SIZE;
@@ -197,6 +206,138 @@ arm_teardown_vectors(void *arg)
 	intr_restore(daif);
 
 	arm64_set_active_vcpu(NULL);
+}
+
+#if defined(__CASEMATE_FREEBSD__)
+static int
+enter_el2_blob(void)
+{
+	/* CASEMATE: HACK: force map el2 hyp elf blob
+	 * into TTBR0 */
+
+	u_int idx;
+	pt_entry_t val;
+
+	vm_paddr_t ttb0paddr;
+	pd_entry_t *ttb0;
+
+	vm_paddr_t lma;
+	pd_entry_t *l1page;
+
+	ttb0paddr = READ_SPECIALREG(ttbr0_el1) & TTBR_BADDR;
+	ttb0 = (pd_entry_t*)pmap_mapdev((vm_paddr_t)ttb0paddr, PAGE_SIZE);
+	lma = vtophys(&vmm_hyp_code);
+
+	/* install l0 */
+	idx = pmap_l0_index(lma);
+	if (ttb0[idx] != 0)
+		panic("enter_el2_blob: non-zero entry");
+	l1page = (pd_entry_t*)malloc_aligned(PAGE_SIZE, PAGE_SIZE, M_HYP, 0);
+	if (!l1page)
+		panic("enter_el2_blob: unable to allocate new page");
+
+	val = PHYS_TO_PTE(vtophys(l1page));
+	val |= TATTR_UXN_TABLE | TATTR_AP_TABLE_NO_EL0 | L0_TABLE;
+	ttb0[idx] = val;
+
+	/* install l1 */
+	idx = pmap_l1_index(lma);
+	if (idx != pmap_l1_index(lma + PAGE_SIZE_64K - 1))
+		panic("enter_el2_blob: lma insufficiently aligned");
+
+	val = PHYS_TO_PTE(vtophys(&vmm_hyp_elf_blob));
+	val |= ATTR_S1_XN;
+	val |= ATTR_AF | ATTR_SH(ATTR_SH_IS) | ATTR_S1_AP(ATTR_S1_AP_RW) \
+	    | ATTR_S1_IDX(VM_MEMATTR_WRITE_BACK) | L1_BLOCK;
+	l1page[idx] = val;
+	dsb(ish);
+	isb();
+
+	pmap_unmapdev(ttb0, PAGE_SIZE);
+	return (0);
+}
+
+static int
+remove_el2_blob(void)
+{
+	u_int idx;
+	vm_paddr_t ttb0paddr;
+	pd_entry_t *ttb0;
+	vm_paddr_t lma;
+
+	ttb0paddr = READ_SPECIALREG(ttbr0_el1) & TTBR_BADDR;
+	ttb0 = (pd_entry_t*)pmap_mapdev((vm_paddr_t)ttb0paddr, PAGE_SIZE);
+	lma = vtophys(&vmm_hyp_code);
+
+	idx = pmap_l0_index(lma);
+	ttb0[idx] = 0;
+
+	/* XXX TLBI? */
+
+	pmap_unmapdev(ttb0, PAGE_SIZE);
+	return (0);
+}
+
+static int
+load_el2_blob(vm_paddr_t *out_vmm_base, vm_offset_t *out_next_hyp_va)
+{
+	vm_offset_t hyp_elf_lma;
+	vm_offset_t hyp_elf_len;
+	int err __diagused;
+	bool rv __diagused;
+	linker_file_t elf;
+
+	/* CASEMATE: HACK: Add QEMU Virt machine UART mappings directly */
+	rv = vmmpmap_enter(VIRT_UART0, PAGE_SIZE, VIRT_UART0,
+	    VM_PROT_READ | VM_PROT_WRITE);
+	MPASS(rv);
+
+	/* CASEMATE: HACK: load nVHE ELF */
+	hyp_elf_len = round_page(&vmm_hyp_elf_blob_end - &vmm_hyp_elf_blob);
+	hyp_elf_lma = vtophys(&vmm_hyp_code);
+	*out_vmm_base = hyp_elf_lma;
+
+	enter_el2_blob();
+
+
+	err = linker_kldload_busy(0);
+	MPASS(err == 0);
+
+	err = load_dynamic_elf_at("vmm_hyp_blob.elf", &vmm_hyp_elf_blob,
+	          hyp_elf_lma, &elf);
+	if (err)
+		panic("%s: failed to load el2 blob",
+		    __func__);
+
+	linker_kldload_unbusy(LINKER_UB_LOCKED);
+
+	/* CASEMATE: HACK: map nVHE blob RWX at EL2 */
+	rv = vmmpmap_enter(hyp_elf_lma, hyp_elf_len, hyp_elf_lma,
+	      VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	MPASS(rv);
+
+	caddr_t hyp_vector_base = linker_file_lookup_symbol(elf, "__nvhe_vector_start", 0);
+	hyp_code_base = (vm_paddr_t)hyp_vector_base;
+
+	/* zero the bss */
+	caddr_t hyp_bss_start = linker_file_lookup_symbol(elf, "__nvhe_bss_start", 0);
+	caddr_t hyp_bss_end = linker_file_lookup_symbol(elf, "__nvhe_bss_end", 0);
+	size_t hyp_bss_len = hyp_bss_end - hyp_bss_start;
+
+	/* HACK: temporarily map bss so kernel can write through it */
+	void *kern_va_hyp_bss = pmap_mapdev((vm_paddr_t)hyp_bss_start, hyp_bss_len);
+	memset(kern_va_hyp_bss, hyp_bss_len, 0);
+	pmap_unmapdev(kern_va_hyp_bss, hyp_bss_len);
+
+	/* done loading, now unmap the nVHE blob */
+	remove_el2_blob();
+
+	/* compute next_hyp_va as before
+	 * TODO: BS: confusion ...
+	 * previously it used the vmm_base which is the phys not the virt,
+	 * so do the same here even though it feels wrong? */
+	*out_next_hyp_va = roundup2((uintptr_t)hyp_elf_lma + hyp_elf_len, L2_SIZE);
+	return (0);
 }
 
 static uint64_t
@@ -303,6 +444,10 @@ vmmops_modinit(int ipinum)
 		el2_mem_alloc = vmem_create("VMM EL2", 0, 0, PAGE_SIZE, 0,
 		    M_WAITOK);
 
+#if defined(__CASEMATE_FREEBSD__)
+		/* CASEMATE: HACK: load+link EL2 blob */
+		load_el2_blob(&vmm_base, &next_hyp_va);
+#else
 		/* Create the mappings for the hypervisor translation table. */
 		hyp_code_len = round_page(&vmm_hyp_code_end - &vmm_hyp_code);
 
@@ -313,6 +458,7 @@ vmmops_modinit(int ipinum)
 		MPASS(rv);
 
 		next_hyp_va = roundup2(vmm_base + hyp_code_len, L2_SIZE);
+#endif
 
 		/* Create a per-CPU hypervisor stack */
 		CPU_FOREACH(cpu) {

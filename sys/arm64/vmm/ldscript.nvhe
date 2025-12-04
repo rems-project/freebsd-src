@@ -1,0 +1,59 @@
+OUTPUT_ARCH(aarch64)
+
+/* CASEMATE: HACK: add linker script for nVHE blob
+ * ... so we can have bss and data sections for casemate global state
+ */
+
+SECTIONS
+{
+	. = text_start;
+
+	.vmm_vectors	:
+	{
+		__nvhe_vector_start = .;
+		*(.vmm_vectors)
+		. = ALIGN(4096);
+		__nvhe_vector_end = .;
+	}
+
+	.text	:
+	{
+		__nvhe_text_start = .;
+		*(.text)
+		. = ALIGN(4096);
+		__nvhe_text_end = .;
+	}
+
+	.rodata		: ALIGN(4096)
+	{
+		__nvhe_rodata_start = .;
+		*(.rodata)
+		. = ALIGN(4096);
+		__nvhe_rodata_end = .;
+	}
+
+	.data		: ALIGN(4096)
+	{
+		__nvhe_data_start = .;
+		*(.data)
+		. = ALIGN(4096);
+		__nvhe_data_end = .;
+	}
+
+	.bss		: ALIGN(4096)
+	{
+		__nvhe_bss_start = .;
+		*(.bss)
+		. = ALIGN(4096);
+		__nvhe_bss_end = .;
+	}
+
+	.dynamic       : { *(.dynamic) }
+
+	.plt	:
+	{
+		*(.plt)
+	}
+
+}
+

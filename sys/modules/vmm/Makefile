@@ -54,12 +54,6 @@ vmm_nvhe.o: vmm_nvhe.c vmm_hyp.c
 	${CC} -c ${NOSAN_CFLAGS:N-mbranch-protection*} ${.IMPSRC} \
 	    -o ${.TARGET} -fpie
 
-vmm_hyp_blob.elf.full:	vmm_nvhe_exception.o vmm_nvhe.o
-	${LD} -m ${LD_EMULATION} -Bdynamic -L ${SYSDIR}/conf -T ${SYSDIR}/conf/ldscript.arm64 \
-	    ${_LDFLAGS:N-zbti-report*} --no-warn-mismatch --warn-common --export-dynamic \
-	    --dynamic-linker /red/herring -X -o ${.TARGET} ${.ALLSRC} \
-	    --defsym=_start='0x0' --defsym=text_start='0x0'
-
 vmm_hyp_blob.elf:	vmm_hyp_blob.elf.full
 	${OBJCOPY} --strip-debug ${.ALLSRC} ${.TARGET}
 
@@ -67,6 +61,27 @@ vmm_hyp_blob.bin:	vmm_hyp_blob.elf
 	${OBJCOPY} --output-target=binary ${.ALLSRC} ${.TARGET}
 
 vmm_hyp_el2.o:	vmm_hyp_blob.bin
+
+
+.if ${MK_CASEMATE} == "yes"
+CFLAGS+= -D__CASEMATE_FREEBSD__ \
+	 -I${SRCTOP}/cl/include
+
+# CASEMATE: HACK: custom link vmm_hyp_blob
+vmm_hyp_blob.elf.full:	vmm_nvhe_exception.o vmm_nvhe.o
+	${LD} -m ${LD_EMULATION} \
+	    --shared \
+	    -L ${SYSDIR}/conf -T ${SYSDIR}/arm64/vmm/ldscript.nvhe \
+	    ${_LDFLAGS:N-zbti-report*} -zforce-bti --no-warn-mismatch --warn-common \
+	    --defsym=_start='0x0' --defsym=text_start='0x0' \
+	    -o ${.TARGET} ${.ALLSRC}
+.else
+vmm_hyp_blob.elf.full:	vmm_nvhe_exception.o vmm_nvhe.o
+	${LD} -m ${LD_EMULATION} -Bdynamic -L ${SYSDIR}/conf -T ${SYSDIR}/conf/ldscript.arm64 \
+	    ${_LDFLAGS:N-zbti-report*} --no-warn-mismatch --warn-common --export-dynamic \
+	    --dynamic-linker /red/herring -X -o ${.TARGET} ${.ALLSRC} \
+	    --defsym=_start='0x0' --defsym=text_start='0x0'
+.endif
 
 .elif ${MACHINE_CPUARCH} == "amd64"
 CFLAGS+= -I${SRCTOP}/sys/${MACHINE}/vmm/io
