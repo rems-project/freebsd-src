@@ -49,6 +49,10 @@
 #include "mmu.h"
 #include "arm64.h"
 
+#if defined(__CASEMATE_FREEBSD__) && defined(VMM_nVHE)
+#include <casemate.h>
+#endif
+
 static struct mtx vmmpmap_mtx;
 static pt_entry_t *l0;
 static vm_paddr_t l0_paddr;

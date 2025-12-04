@@ -209,6 +209,118 @@ arm_teardown_vectors(void *arg)
 }
 
 #if defined(__CASEMATE_FREEBSD__)
+#include <casemate.h>
+#include <machine/casemate_debug_uart.h>
+
+/* defined in pmap.c */
+extern void *__casemate_state;
+extern int casemate_ghost_driver_putc(char c);
+extern void casemate_ghost_driver_abort(const char *msg);
+extern void casemate_ghost_driver_trace(const char *msg);
+
+static struct casemate_options casemate_cfg = CASEMATE_DEFAULT_OPTS;
+static uint64_t CASEMATE_ST_SIZE;
+
+static int
+casemate_allocate_state(void)
+{
+	vm_page_t m;
+	void *kern_virt;
+
+	/* configure casemate */
+	casemate_cfg.enable_checking = true;
+	casemate_cfg.enable_tracing = false;
+	casemate_cfg.enable_safety_checks = false;
+	casemate_cfg.check_opts.uninit_behavior = CM_IGNORE_UNINIT;
+	casemate_cfg.log_opts.condensed_format = true;
+	casemate_cfg.log_opts.omit_reads = true;
+
+	CASEMATE_ST_SIZE = roundup2(sizeof_casemate_model(&casemate_cfg), PAGE_SIZE);
+
+	/* ideally we'd just now do something like:
+	 * ```
+	 * 	va = malloc(size); vmmpmap_enter(hyp_va, size, vtophys(va))
+	 * ```
+	 * but this has two problems:
+	 * 1. the allocation is not guaranteed to be contiguous; and
+	 * 2. the allocation might be paged out
+	 *
+	 * so to solve both these problems we use vm allocator, for noobj pages
+	 * which lets us wire a contiguous block of pages in memory
+	 * and then use the DMAP to access it from EL1
+	 */
+	m = vm_page_alloc_noobj_contig(VM_ALLOC_WAITOK | VM_ALLOC_WIRED,
+	    CASEMATE_ST_SIZE >> PAGE_SHIFT, 0, ~0ul, PAGE_SIZE, 0, VM_MEMATTR_DEFAULT);
+	MPASS(m != NULL);
+	kern_virt = (void*)PHYS_TO_DMAP(m->phys_addr);
+
+	KASSERT(rounddown2(kern_virt, PAGE_SIZE) == kern_virt,
+	    ("%s: Misaligned allocation [%lx] %p", __func__, CASEMATE_ST_SIZE, kern_virt));
+
+	__casemate_state = kern_virt;
+	return (0);
+}
+
+static void
+casemate_state_vmmpmap_enter(vm_offset_t hyp_virt)
+{
+	bool rv __diagused;
+	vm_offset_t kern_virt = (vm_offset_t)__casemate_state;
+	vm_paddr_t phys = vtophys(kern_virt);
+
+	rv = vmmpmap_enter(hyp_virt, CASEMATE_ST_SIZE, phys, VM_PROT_READ | VM_PROT_WRITE);
+	MPASS(rv);
+}
+
+static int
+casemate_attach_el2(vm_offset_t hyp_virt)
+{
+	int err __diagused;
+
+	casemate_state_vmmpmap_enter(hyp_virt);
+	printf("vmm: CASEMATE: attached EL2 @ 0x%lx\n", hyp_virt);
+
+	err = vmm_call_hyp(HYP_CASEMATE_INIT, hyp_virt, CASEMATE_ST_SIZE);
+	MPASS(err == 0);
+
+	return (0);
+}
+
+
+static bool
+casemate_first_time_init(void)
+{
+	int err __diagused;
+
+	err = casemate_allocate_state();
+	MPASS(err == 0);
+
+	// set casemate UART to be QEMU's virt UART0
+	CASEMATE_UART0_DEVICE_BASE = \
+		(unsigned long long)pmap_mapdev((vm_paddr_t)QEMU_VIRT_UART0_BASE, PAGE_SIZE);
+
+	// initialise the EL1 driver
+	struct ghost_driver cm_driver = {
+		.putc = &casemate_ghost_driver_putc,
+		.abort = &casemate_ghost_driver_abort,
+		.read_physmem = NULL,
+		.read_sysreg = NULL,
+		.trace = &casemate_ghost_driver_trace,
+	};
+
+	initialise_ghost_driver(&cm_driver);
+
+	err = initialise_casemate_model(
+		&casemate_cfg,
+		HYP_VM_MIN_ADDRESS,
+		HYP_VM_MAX_ADDRESS - HYP_VM_MIN_ADDRESS,
+		__casemate_state, CASEMATE_ST_SIZE
+	);
+	MPASS(err == 0);
+	return (true);
+}
+#endif
+
 static int
 enter_el2_blob(void)
 {
@@ -232,7 +344,7 @@ enter_el2_blob(void)
 	idx = pmap_l0_index(lma);
 	if (ttb0[idx] != 0)
 		panic("enter_el2_blob: non-zero entry");
-	l1page = (pd_entry_t*)malloc_aligned(PAGE_SIZE, PAGE_SIZE, M_HYP, 0);
+	l1page = (pd_entry_t*)malloc_aligned(PAGE_SIZE, PAGE_SIZE, M_HYP, M_WAITOK | M_ZERO);
 	if (!l1page)
 		panic("enter_el2_blob: unable to allocate new page");
 
@@ -288,7 +400,7 @@ load_el2_blob(vm_paddr_t *out_vmm_base, vm_offset_t *out_next_hyp_va)
 	linker_file_t elf;
 
 	/* CASEMATE: HACK: Add QEMU Virt machine UART mappings directly */
-	rv = vmmpmap_enter(VIRT_UART0, PAGE_SIZE, VIRT_UART0,
+	rv = vmmpmap_enter(QEMU_VIRT_UART0_BASE, PAGE_SIZE, QEMU_VIRT_UART0_BASE,
 	    VM_PROT_READ | VM_PROT_WRITE);
 	MPASS(rv);
 
@@ -331,6 +443,8 @@ load_el2_blob(vm_paddr_t *out_vmm_base, vm_offset_t *out_next_hyp_va)
 
 	/* done loading, now unmap the nVHE blob */
 	remove_el2_blob();
+
+	printf("vmm: loaded nVHE blob @ 0x%lx\n", hyp_elf_lma);
 
 	/* compute next_hyp_va as before
 	 * TODO: BS: confusion ...
@@ -420,6 +534,12 @@ vmmops_modinit(int ipinum)
 		break;
 	}
 	pa_range_bits = pa_range_field >> ID_AA64MMFR0_PARange_SHIFT;
+
+#if defined(__CASEMATE_FREEBSD__)
+	/* CASEMATE: allocate casemate state and switch on */
+	rv = casemate_first_time_init();
+	MPASS(rv);
+#endif
 
 	if (!in_vhe()) {
 		/* Initialise the EL2 MMU */
@@ -581,6 +701,23 @@ vmmops_modinit(int ipinum)
 				    M_WAITOK);
 		}
 
+#if defined(__CASEMATE_FREEBSD__)
+		next_hyp_va = roundup2(next_hyp_va, L1_SIZE);
+		int err __diagused;
+		vm_offset_t casemate_hyp_va = next_hyp_va;
+
+		if ((casemate_hyp_va  > HYP_VM_MAX_ADDRESS - PAGE_SIZE)
+		   ||((HYP_VM_MAX_ADDRESS - PAGE_SIZE - CASEMATE_ST_SIZE) < casemate_hyp_va)) {
+			panic("CASEMATE: not enough hyp vmem to allocate casemate state\n");
+			return (-1);
+		   }
+
+		err = casemate_attach_el2(casemate_hyp_va);
+		MPASS(err == 0);
+
+		next_hyp_va += roundup2(next_hyp_va+CASEMATE_ST_SIZE, L1_SIZE);
+#endif
+
 		/*
 		 * Add the memory after the stacks. There is most of an L2 block
 		 * between the last stack and the first allocation so this should
@@ -589,7 +726,9 @@ vmmops_modinit(int ipinum)
 		if (next_hyp_va < HYP_VM_MAX_ADDRESS - PAGE_SIZE)
 			vmem_add(el2_mem_alloc, next_hyp_va,
 			    HYP_VM_MAX_ADDRESS - next_hyp_va, M_WAITOK);
+
 	}
+
 	cnthctl_el2 = vmm_read_reg(HYP_REG_CNTHCTL);
 
 	vgic_init();
@@ -649,6 +788,12 @@ el2_map_enter(vm_offset_t data, vm_size_t size, vm_prot_t prot)
 	vmem_addr_t addr;
 	int err __diagused;
 	bool rv __diagused;
+
+#ifdef __CASEMATE_FREEBSD__
+	/* CASEMATE: HACK: double-check this */
+	/*KASSERT(size < PAGE_SIZE,
+	            ("%s: Bad oversized allocation\n", __func__));*/
+#endif
 
 	err = vmem_alloc(el2_mem_alloc, size, M_NEXTFIT | M_WAITOK, &addr);
 	MPASS(err == 0);

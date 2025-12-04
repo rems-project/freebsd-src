@@ -37,6 +37,11 @@
 #include "arm64.h"
 #include "hyp.h"
 
+#if defined(__CASEMATE_FREEBSD__) && !defined(VMM_VHE)
+#include <casemate.h>
+#include "io/debug_uart0.h"
+#endif
+
 struct hypctx;
 
 uint64_t VMM_HYP_FUNC(do_call_guest)(struct hypctx *);

@@ -67,12 +67,12 @@ vmm_hyp_el2.o:	vmm_hyp_blob.bin
 CFLAGS+= -D__CASEMATE_FREEBSD__ \
 	 -I${SRCTOP}/cl/include
 
-# CASEMATE: HACK: custom link vmm_hyp_blob
-vmm_hyp_blob.elf.full:	vmm_nvhe_exception.o vmm_nvhe.o
+# CASEMATE: HACK: custom linker that places sections in right places
+vmm_hyp_blob.elf.full:	vmm_nvhe_exception.o vmm_nvhe.o ${SRCTOP}/cl/lib/casemate.bsd.hyp.o
 	${LD} -m ${LD_EMULATION} \
 	    --shared \
 	    -L ${SYSDIR}/conf -T ${SYSDIR}/arm64/vmm/ldscript.nvhe \
-	    ${_LDFLAGS:N-zbti-report*} -zforce-bti --no-warn-mismatch --warn-common \
+	    ${_LDFLAGS:N-zbti-report*} --no-warn-mismatch --warn-common \
 	    --defsym=_start='0x0' --defsym=text_start='0x0' \
 	    -o ${.TARGET} ${.ALLSRC}
 .else

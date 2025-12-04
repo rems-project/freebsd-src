@@ -29,6 +29,8 @@
  * SUCH DAMAGE.
  */
 
+#define VMM_nVHE
+
 #define	VMM_STATIC	static
 #define	VMM_HYP_FUNC(func)	vmm_nvhe_ ## func
 
@@ -37,6 +39,104 @@
 #define	EL0_REG(reg)		MRS_REG_ALT_NAME(reg ## _EL0)
 
 #include "vmm_hyp.c"
+
+#if defined(__CASEMATE_FREEBSD__)
+#include "io/debug_uart0.h"
+#include <dev/psci/psci.h>
+
+static void
+psci_system_off(void)
+{
+	__asm __volatile(
+		"mov w0,%w[x0]\n"
+		"smc #0x0\n"
+		:
+		: [x0] "r" (PSCI_FNID_SYSTEM_OFF)
+		:
+	);
+	__unreachable();
+}
+
+static int
+casemate_ghost_driver_putc(char c)
+{
+	casemate_putc(c);
+	return 0;
+}
+
+
+static void
+casemate_ghost_driver_trace(const char *msg)
+{
+	/* CR before and after ensures this appears on its own 'line' */
+	casemate_puts("\r");
+	casemate_puts("\033[46;37;1m");
+	casemate_puts(msg);
+	casemate_puts("\033[0m");
+	/* pad to 79 */
+	for (int i=strlen(msg); i < 140; i++) {
+		casemate_putc(' ');
+	}
+	casemate_puts("\r");
+}
+
+static void
+casemate_ghost_driver_abort(const char *msg)
+{
+	casemate_puts("\033[41;37;1m[");
+	casemate_puts(msg);
+	casemate_puts("]\033[0m");
+	casemate_puts("\n");
+	psci_system_off();
+	__unreachable();
+}
+
+uint64_t
+casemate_cpu_id(void)
+{
+	return 0;
+}
+
+static bool __casemate_init = false;
+
+static int
+casemate_ensure_setup(uint64_t smva, size_t sm_size)
+{
+	int r;
+
+	if (__casemate_init)
+		return (-1);
+
+	casemate_puts("vmm: CASEMATE: initialising at EL2\n");
+
+	// initialise the EL2 driver
+	struct ghost_driver cm_driver = {
+		.putc = &casemate_ghost_driver_putc,
+		.abort = &casemate_ghost_driver_abort,
+		.read_physmem = NULL,
+		.read_sysreg = NULL,
+		.trace = &casemate_ghost_driver_trace,
+	};
+	initialise_ghost_driver(&cm_driver);
+	r = attach_casemate_model((void*)smva);
+
+	if (r)
+		return -1;
+
+	__casemate_init = true;
+
+	casemate_model_step_msr(SYSREG_MAIR_EL2, READ_SPECIALREG(MAIR_EL2));
+	casemate_model_step_msr(SYSREG_TCR_EL2, READ_SPECIALREG(TCR_EL2));
+	casemate_model_step_msr(SYSREG_VTCR_EL2, READ_SPECIALREG(VTCR_EL2));
+	casemate_model_step_msr(SYSREG_TTBR_EL2, READ_SPECIALREG(TTBR0_EL2));
+	casemate_model_step_msr(SYSREG_VTTBR, READ_SPECIALREG(VTTBR_EL2));
+
+	casemate_puts("vmm: CASEMATE: initialised EL2\n");
+
+	return (0);
+}
+#endif
+
 
 uint64_t vmm_hyp_enter(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t, uint64_t);
@@ -109,6 +209,10 @@ vmm_hyp_enter(uint64_t handle, uint64_t x1, uint64_t x2, uint64_t x3,
 	case HYP_S2_TLBI_ALL:
 		VMM_HYP_FUNC(s2_tlbi_all)(x1);
 		return (0);
+#if defined(__CASEMATE_FREEBSD__)
+	case HYP_CASEMATE_INIT:
+		return casemate_ensure_setup(x1, x2);
+#endif
 	case HYP_CLEANUP:	/* Handled in vmm_hyp_exception.S */
 	default:
 		break;

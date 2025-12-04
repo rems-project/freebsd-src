@@ -125,6 +125,11 @@ extern bool		pmap_lpa_enabled;
 	(uint64_t)(asid) << TTBR_ASID_SHIFT;			\
 })
 
+#ifdef __CASEMATE_FREEBSD__
+#include <casemate.h>
+extern void *__casemate_state;
+#endif
+
 #define	PMAP_WANT_ACTIVE_CPUS_NAIVE
 
 extern vm_offset_t virtual_avail;

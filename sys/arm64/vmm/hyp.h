@@ -89,6 +89,11 @@
 #define	HYP_S2_TLBI_RANGE	0x00000010
 #define	HYP_S2_TLBI_ALL		0x00000011
 
+#ifdef __CASEMATE_FREEBSD__
+/* CASEMATE: HACK: add hypercall for initialising Casemate */
+#define	HYP_CASEMATE_INIT	0xfffffffe
+#endif
+
 /*
  * When taking asynchronous exceptions, or interrupts, with the exception of the
  * SError interrupt, the exception syndrome register is not updated with the

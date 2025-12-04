@@ -43,6 +43,14 @@ CFLAGS += ${ARM64_SSP_CFLAGS}
 ARCH_FLAGS += ${ARM64_SSP_CFLAGS}
 .endif
 
+.if ${MK_CASEMATE} == "yes"
+  SYSTEM_OBJS +=  ${SRCTOP}/cl/lib/casemate.bsd.kern.o
+  CFLAGS +=  -D__CASEMATE_FREEBSD__ \
+	     -I${SRCTOP}/cl/include
+
+${SRCTOP}/cl/include/casemate.h: ${SRCTOP}/cl/lib/casemate.bsd.kern.o
+.endif
+
 # Use a custom SYSTEM_LD command to generate the elf kernel, so we can
 # set the text segment start address, and also strip the "arm mapping
 # symbols" which have names like $a.0 and $d.2; see the document
@@ -75,6 +83,10 @@ CFLAGS += -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 %RULES
 
 .include "$S/conf/kern.post.mk"
+
+.if ${MK_CASEMATE} == "yes"
+${FULLKERNEL}: ${SRCTOP}/cl/lib/casemate.bsd.kern.o
+.endif
 
 # Create a kernel.bin file...
 # Copy the kernel to u-boot's booti image format (the elf headers are

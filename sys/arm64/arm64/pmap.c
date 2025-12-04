@@ -151,6 +151,59 @@
 #include <machine/md_var.h>
 #include <machine/pcb.h>
 
+#ifdef __CASEMATE_FREEBSD__
+#include <casemate.h>
+#include <machine/casemate_debug_uart.h>
+#include <dev/psci/psci.h>
+
+/* CASEMATE: global casemate state */
+int casemate_ghost_driver_putc(char c);
+void casemate_ghost_driver_abort(const char *msg);
+void casemate_ghost_driver_trace(const char *msg);
+
+/* CASEMATE: debug/trace output device base address */
+unsigned long long CASEMATE_UART0_DEVICE_BASE;
+
+uint64_t
+casemate_cpu_id(void)
+{
+	return 0;
+}
+
+int
+casemate_ghost_driver_putc(char c)
+{
+	casemate_putc(c);
+	return 0;
+}
+
+void
+casemate_ghost_driver_abort(const char *msg)
+{
+	casemate_puts("\033[41;37;1m");
+	casemate_puts(msg);
+	casemate_puts("\033[0m");
+	casemate_puts("\n");
+	psci_call(PSCI_FNID_SYSTEM_OFF, 0, 0, 0);
+	__unreachable();
+}
+
+void
+casemate_ghost_driver_trace(const char *msg)
+{
+	/* CR before and after ensures this appears on its own 'line' */
+	casemate_puts("\r");
+	casemate_puts("\033[46;37;1m");
+	casemate_puts(msg);
+	casemate_puts("\033[0m");
+	/* pad to 79 */
+	for (int i=strlen(msg); i < 140; i++) {
+		casemate_putc(' ');
+	}
+	casemate_puts("\r");
+}
+#endif
+
 #ifdef NUMA
 #define	PMAP_MEMDOM	MAXMEMDOM
 #else
@@ -535,6 +588,52 @@ static void pmap_bti_deassign_all(pmap_t pmap);
  * They need to be atomic as the System MMU may write to the table at
  * the same time as the CPU.
  */
+#ifdef __CASEMATE_FREEBSD__
+void *__casemate_state;
+
+#define CMSTEP_store(TABLE, VAL) \
+	casemate_model_step_write(WMO_release, vtophys((TABLE)), VAL)
+
+#define CMSTEP_load(TABLE, VAL) \
+	casemate_model_step_read(vtophys((TABLE)), VAL)
+
+#define __casemate_step(TABLE, KIND) \
+	if (__casemate_state) { \
+		__val = *(TABLE); \
+		CMSTEP_##KIND(TABLE, __val); \
+	}
+
+#define __casemate_body(TABLE, ATOM, KIND) { \
+	volatile pt_entry_t __ret,__val; \
+	__ret = (ATOM); \
+	__casemate_step(TABLE, KIND); \
+	return (__ret); \
+}
+
+#define __casemate_body_noret(TABLE, ATOM, KIND) { \
+	volatile pt_entry_t __val; \
+	ATOM; \
+	__casemate_step(TABLE, KIND); \
+}
+
+#define __annotated_casemate_store_fn1(NAME, ATOM) \
+	static inline void NAME (pt_entry_t *table) __casemate_body_noret(table, ATOM, store)
+#define __annotated_casemate_store_fn2(NAME, ARG, ATOM) \
+	static inline void NAME (pt_entry_t *table, uint64_t ARG) __casemate_body_noret(table, ATOM, store)
+
+#define __annotated_casemate_load_fn1(NAME, ATOM, KIND) \
+	static inline pt_entry_t NAME (pt_entry_t *table) __casemate_body(table, ATOM, KIND)
+#define __annotated_casemate_load_fn2(NAME, ARG, ATOM, KIND) \
+	static inline pt_entry_t NAME (pt_entry_t *table, uint64_t ARG) __casemate_body(table, ATOM, KIND)
+
+__annotated_casemate_store_fn1(pmap_clear, atomic_store_64(table, 0))
+__annotated_casemate_store_fn2(pmap_clear_bits, bits, atomic_clear_64(table, bits))
+__annotated_casemate_load_fn1(pmap_load, *(table), load)
+__annotated_casemate_load_fn1(pmap_load_clear, atomic_swap_64(table, 0), store)
+__annotated_casemate_load_fn2(pmap_load_store, entry, atomic_swap_64(table, entry), store)
+__annotated_casemate_store_fn2(pmap_set_bits, bits, atomic_set_64(table, bits))
+__annotated_casemate_store_fn2(pmap_store, entry, atomic_store_64(table, entry))
+#else
 #define	pmap_clear(table)		atomic_store_64(table, 0)
 #define	pmap_clear_bits(table, bits)	atomic_clear_64(table, bits)
 #define	pmap_load(table)		(*table)
